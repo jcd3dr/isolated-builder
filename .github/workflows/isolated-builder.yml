@@ -4,30 +4,46 @@ on:
   workflow_dispatch:
     inputs:
       target_repo:
-        description: 'owner/repo a construir (vacio = este mismo repo)'
+        description: 'owner/repo a validar (vacio = este mismo repo)'
         required: false
         default: ''
       ref:
-        description: 'branch/tag/commit a construir'
+        description: 'branch/tag/commit a validar'
         required: false
         default: 'main'
-      compose_file:
-        description: 'Ruta al docker-compose.yml dentro del repo'
-        required: false
-        default: 'docker-compose.yml'
-      smoke_url:
-        description: 'URL local a la que pegarle para el smoke test'
-        required: false
-        default: 'http://localhost:3000/health'
       env_vars:
         description: 'Variables para .env, una por linea KEY=VALUE (opcional)'
         required: false
         default: ''
+      node_version:
+        description: 'Version de Node a instalar, ej. 20 (opcional)'
+        required: false
+        default: ''
+      python_version:
+        description: 'Version de Python a instalar, ej. 3.12 (opcional)'
+        required: false
+        default: ''
+      setup_commands:
+        description: 'Comandos de setup, uno por linea (ej. npm ci / pip install -r requirements.txt). Opcional.'
+        required: false
+        default: ''
+      test_commands:
+        description: 'Comandos de validacion/test, uno por linea (ej. npm test / pytest / npm run lint). Opcional, modo generico.'
+        required: false
+        default: ''
+      compose_file:
+        description: 'Ruta a un docker-compose.yml para el modo docker (opcional). Vacio = se salta este modo.'
+        required: false
+        default: ''
+      smoke_url:
+        description: 'URL local para el smoke test del modo docker (solo aplica si compose_file esta seteado)'
+        required: false
+        default: 'http://localhost:3000/health'
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout (repo objetivo)
         uses: actions/checkout@v4
@@ -36,24 +52,52 @@ jobs:
           ref: ${{ inputs.ref }}
           token: ${{ inputs.target_repo != '' && secrets.CROSS_REPO_PAT || secrets.GITHUB_TOKEN }}
 
+      - name: Set up Node
+        if: inputs.node_version != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Set up Python
+        if: inputs.python_version != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
       - name: Set up Docker Buildx
+        if: inputs.compose_file != ''
         uses: docker/setup-buildx-action@v3
 
       - name: Preparar .env
         if: inputs.env_vars != ''
+        run: printf '%s\n' "${{ inputs.env_vars }}" > .env
+
+      - name: Setup (modo generico)
+        if: inputs.setup_commands != ''
         run: |
-          printf '%s\n' "${{ inputs.env_vars }}" > .env
+          set -e
+          ${{ inputs.setup_commands }}
+
+      - name: Test / validacion (modo generico)
+        if: inputs.test_commands != ''
+        run: |
+          set -e
+          ${{ inputs.test_commands }}
 
       - name: Validar docker-compose
+        if: inputs.compose_file != ''
         run: docker compose -f "${{ inputs.compose_file }}" config
 
       - name: Build imagen(es)
+        if: inputs.compose_file != ''
         run: docker compose -f "${{ inputs.compose_file }}" build
 
       - name: Levantar contenedor(es)
+        if: inputs.compose_file != ''
         run: docker compose -f "${{ inputs.compose_file }}" up -d
 
       - name: Esperar a que el servicio responda
+        if: inputs.compose_file != ''
         run: |
           for i in $(seq 1 15); do
             if curl -sf "${{ inputs.smoke_url }}" > /dev/null; then
@@ -64,6 +108,7 @@ jobs:
           echo "Timeout esperando el servicio"; exit 1
 
       - name: Smoke test
+        if: inputs.compose_file != ''
         run: |
           curl -sf "${{ inputs.smoke_url }}" || {
             echo "--- LOGS ---"
@@ -71,6 +116,6 @@ jobs:
             exit 1
           }
 
-      - name: Destruir entorno (siempre)
-        if: always()
+      - name: Destruir entorno docker (siempre)
+        if: always() && inputs.compose_file != ''
         run: docker compose -f "${{ inputs.compose_file }}" down -v --remove-orphans
