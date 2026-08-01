@@ -1,0 +1,6 @@
+version: "3.8"
+services:
+  app:
+    image: traefik/whoami
+    ports:
+      - "3000:80"
